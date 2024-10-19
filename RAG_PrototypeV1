@@ -1,0 +1,215 @@
+import openai
+import pandas as pd
+import numpy as np
+import faiss
+import tiktoken
+import tkinter as tk
+from tkinter import ttk
+import threading
+
+# Load your extended synthetic data
+data = pd.read_csv('DATA_FILE_PATH')  # Replace with the correct file path
+
+# OpenAI API setup
+openai.api_key ='Your api key'
+
+embedding_model = "text-embedding-3-large"
+completion_model = "gpt-4o-2024-08-06"  # Adjust as needed
+
+# Function to generate embeddings using OpenAI with precise token-based truncation
+def get_embedding(text, model=embedding_model):
+    tokenizer = tiktoken.encoding_for_model(model)
+    tokens = tokenizer.encode(text)
+    max_tokens = 8191
+    if len(tokens) > max_tokens:
+        tokens = tokens[:max_tokens]
+    truncated_text = tokenizer.decode(tokens)
+    response = openai.Embedding.create(input=[truncated_text], model=model)
+    return response['data'][0]['embedding']
+
+# Generate embeddings for all content using the specified model
+data['embedding'] = data.apply(lambda row: get_embedding(f"{row['Type of Consulting']} {row['Educational and Professional Path']} {row['Important Skills']} {row['Social Impact']} {row['Typical Job Titles']} {row['Salary Range']} {row['Networking Strategies']} {row['Common Certifications']} {row['Top Companies']} {row['Recommended Career Steps']} {row['General Tips']} {row['How to Start Over Again']}", model=embedding_model), axis=1)
+
+# Convert embeddings to numpy array
+embeddings = np.array(data['embedding'].tolist()).astype('float32')
+
+# Set up FAISS index for CPU
+index = faiss.IndexFlatL2(embeddings.shape[1])
+index.add(embeddings)
+
+# Query function for the RAG system
+def query_rag(query):
+    query_embedding = get_embedding(query, model=embedding_model)
+    query_embedding = np.array([query_embedding]).astype('float32')
+    distances, indices = index.search(query_embedding, k=3)
+    results = data.iloc[indices[0]]
+    articles = []
+    for idx, row in results.iterrows():
+        articles.append({
+            "name": row['Type of Consulting'],
+            "path": row['Educational and Professional Path'],
+            "skills": row['Important Skills'],
+            "impact": row['Social Impact'],
+            "job_titles": row['Typical Job Titles'],
+            "salary": row['Salary Range'],
+            "networking": row['Networking Strategies'],
+            "certifications": row['Common Certifications'],
+            "companies": row['Top Companies'],
+            "career_steps": row['Recommended Career Steps'],
+            "tips": row['General Tips'],
+            "start_over": row['How to Start Over Again']
+        })
+    return articles
+
+# Function to build dynamic prompts with conversation history
+def build_dynamic_prompt(user_query, conversation_history, articles):
+    context = ""
+    for turn in conversation_history:
+        context += f"User: {turn['user_query']}\nAssistant: {turn['response']}\n"
+    prompt = (
+        f"{context}\nUser: {user_query}\nAssistant: Based on the following articles:\n"
+    )
+    for article in articles:
+        prompt += (
+            f"\n- Type of Consulting: {article['name']}\n"
+            f"  Path: {article['path']}\n"
+            f"  Skills: {article['skills']}\n"
+            f"  Social Impact: {article['impact']}\n"
+            f"  Job Titles: {article['job_titles']}\n"
+            f"  Salary Range: {article['salary']}\n"
+            f"  Networking Strategies: {article['networking']}\n"
+            f"  Common Certifications: {article['certifications']}\n"
+            f"  Top Companies: {article['companies']}\n"
+            f"  Recommended Career Steps: {article['career_steps']}\n"
+            f"  General Tips: {article['tips']}\n"
+            f"  How to Start Over: {article['start_over']}\n"
+        )
+    prompt += "\nAnswer the following question by providing a detailed and extended response, integrating all relevant information from the articles into your answer."
+    return prompt
+
+# Function to generate a completion based on the retrieved articles and conversation history
+def generate_completion(user_query, retrieved_articles, conversation_history):
+    prompt = build_dynamic_prompt(user_query, conversation_history, retrieved_articles)
+
+    response = openai.ChatCompletion.create(
+        model=completion_model,
+        messages=[{"role": "system", "content": "You are a knowledgeable assistant."}, {"role": "user", "content": prompt}],
+        max_tokens=500,
+        temperature=0.7
+    )
+    return response['choices'][0]['message']['content'].strip()
+
+# Main function to answer the question with conversation history tracking
+def answer_question(user_query, conversation_history):
+    # Query the RAG system
+    advice = query_rag(user_query)
+    # Generate a summary or additional information based on the retrieved articles
+    completion_result = generate_completion(user_query, advice, conversation_history)
+    # Update conversation history
+    conversation_history.append({
+        "user_query": user_query,
+        "response": completion_result
+    })
+    # Format the output
+    result_text = f"Summary:\n\n{completion_result}\n\nDetailed Paths and Information:\n"
+    for article in advice:
+        result_text += (
+            f"\nType of Consulting: {article['name']}\n"
+            f"Path: {article['path']}\n"
+            f"Skills: {article['skills']}\n"
+            f"Social Impact: {article['impact']}\n"
+            f"Job Titles: {article['job_titles']}\n"
+            f"Salary Range: {article['salary']}\n"
+            f"Networking Strategies: {article['networking']}\n"
+            f"Common Certifications: {article['certifications']}\n"
+            f"Top Companies: {article['companies']}\n"
+            f"Recommended Career Steps: {article['career_steps']}\n"
+            f"General Tips: {article['tips']}\n"
+            f"How to Start Over: {article['start_over']}\n"
+        )
+    return result_text, conversation_history
+
+# Function to start the chatbot interface using Tkinter
+def start_interface():
+    # Set up the main window
+    root = tk.Tk()
+    root.title("Advanced Career Consulting Chatbot")
+    root.configure(bg='#1E1E2F')
+
+    # Frame for conversation display
+    conversation_frame = tk.Frame(root, bg='#1E1E2F')
+    conversation_frame.pack(pady=10, padx=20, fill=tk.BOTH, expand=True)
+
+    # Text widget to display conversation history
+    conversation_display = tk.Text(conversation_frame, wrap="word", height=20, width=70, font=('Segoe UI', 12),
+                                   bg='#2B2B3D', fg='#EAEAEA', bd=0, padx=15, pady=10, relief=tk.FLAT)
+    conversation_display.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    # Scrollbar for conversation history
+    scrollbar = tk.Scrollbar(conversation_frame, command=conversation_display.yview, bg='#1E1E2F')
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    conversation_display.config(yscrollcommand=scrollbar.set)
+
+    # Frame for input and button
+    input_frame = tk.Frame(root, bg='#1E1E2F')
+    input_frame.pack(pady=10, fill=tk.X, padx=20)
+
+    # Entry field for user input
+    question_entry = tk.Entry(input_frame, width=50, font=('Segoe UI', 12), bg='#2B2B3D', fg='#EAEAEA',
+                              insertbackground='#61AFEF', bd=0, relief=tk.FLAT)
+    question_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), pady=5)
+    question_entry.config(highlightthickness=1, highlightbackground='#3C3C50', highlightcolor='#61AFEF')
+
+    # Initialize conversation history
+    conversation_history = []
+
+    # Function to display messages in the chat window
+    def display_message(sender, message):
+        if sender == "User":
+            conversation_display.insert(tk.END, f"\nYou: {message}\n", 'user')
+        else:
+            conversation_display.insert(tk.END, f"\nAssistant: {message}\n", 'assistant')
+        conversation_display.see(tk.END)  # Auto-scroll to the bottom
+
+    # Function to handle button click
+    def on_button_click():
+        user_query = question_entry.get()
+        if user_query:
+            question_entry.config(state=tk.DISABLED)  # Disable input during processing
+            root.update()
+
+            # Use threading to avoid freezing the GUI while processing
+            def process_query():
+                display_message("User", user_query)
+                result, updated_conversation_history = answer_question(user_query, conversation_history)
+                conversation_history[:] = updated_conversation_history  # Update the list in place
+
+                # Update the conversation display
+                question_entry.config(state=tk.NORMAL)  # Re-enable input
+                display_message("Assistant", result)
+                question_entry.delete(0, tk.END)
+
+                # Run the query processing in a separate thread
+                threading.Thread(target=process_query).start()
+
+            # Send button for asking the question
+            send_button = tk.Button(input_frame, text="Send", font=('Segoe UI', 12, 'bold'), bg='#61AFEF', fg='#1E1E2F',
+                                    bd=0,
+                                    padx=10, pady=5, relief=tk.FLAT, activebackground='#4C8BC1',
+                                    activeforeground='#1E1E2F',
+                                    command=on_button_click)
+            send_button.pack(side=tk.RIGHT)
+            send_button.bind("<Enter>", lambda e: send_button.config(bg='#4C8BC1'))  # Hover effect
+            send_button.bind("<Leave>", lambda e: send_button.config(bg='#61AFEF'))  # Restore original color
+
+            # Tags for styling conversation text (chat bubbles)
+            conversation_display.tag_config('user', foreground='#61AFEF', font=('Segoe UI', 12, 'bold'))
+            conversation_display.tag_config('assistant', foreground='#98C379', font=('Segoe UI', 12))
+
+            # Adjust the window size dynamically
+            root.geometry("850x650")
+            root.minsize(650, 500)
+            root.mainloop()
+
+        if __name__ == "__main__":
+            start_interface()
